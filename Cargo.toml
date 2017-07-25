@@ -1,0 +1,10 @@
+[package]
+name = "gurps-point-calculator"
+version = "0.1.0"
+authors = ["Patrick Burroughs (Celti) <celti@celti.name>"]
+
+[dependencies]
+regex = "0.2"
+lazy_static = "0.2"
+error-chain = "0.10"
+separator = "0.3.1"
