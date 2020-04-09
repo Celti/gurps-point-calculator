@@ -3,19 +3,19 @@
 // Games. This game aid is the original creation of Patrick Burroughs and is
 // released for free distribution, and not for resale, under the permissions
 // granted in the Steve Jackson Games Online Policy [1].
-// 
-// Copyright (c) 2017 Patrick L. H. Burroughs.
-// 
+//
+// Copyright (c) 2017-2020 Patrick L. H. Burroughs.
+//
 // Permission is hereby granted, free of charge, to any person obtaining a copy of
 // this software and associated documentation files (the "Software"), to deal in
 // the Software for non-commercial use, including without limitation the rights to
 // use, copy, modify, merge, publish, distribute, or sublicense under a compatible
 // license, and to permit persons to whom the Software is furnished to do so,
 // subject to the following condition:
-// 
+//
 // The above copyright and trademark notices and this permission notice shall be
 // included in all copies or substantial portions of the Software.
-// 
+//
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -26,61 +26,29 @@
 //
 // [1] http://www.sjgames.com/general/online_policy.html
 
-#![recursion_limit = "1024"]
-#[macro_use]
-extern crate error_chain;
-#[macro_use]
-extern crate lazy_static;
-extern crate regex;
-extern crate separator;
-
-use errors::*;
+use anyhow::Result;
+use once_cell::sync::Lazy;
+use rayon::iter::{IntoParallelRefIterator, ParallelBridge, ParallelIterator};
 use regex::Regex;
 use separator::FixedPlaceSeparatable;
 use std::env;
 use std::fs::File;
-use std::io::{self, Read, BufRead};
+use std::io::{self, BufRead, BufReader};
 
-mod errors {
-    error_chain! {
-        foreign_links {
-            Io(::std::io::Error);
-            Parse(::std::num::ParseFloatError);
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+enum Points {
+    Points(f64),
+    Disads(f64),
+    Angle(f64),
+    Curly(f64),
+    Pipe(f64),
+    Money(f64),
+    Weight(f64),
 }
 
-struct Input<'a> {
-    source: Box<BufRead + 'a>,
-}
-
-impl<'a> Input<'a> {
-    fn console(stdin: &'a io::Stdin) -> Input<'a> {
-        Input { source: Box::new(stdin.lock()) }
-    }
-
-    fn file(path: &str) -> io::Result<Input<'a>> {
-        File::open(path).map(|file| Input { source: Box::new(io::BufReader::new(file)) })
-    }
-}
-
-impl<'a> Read for Input<'a> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.source.read(buf)
-    }
-}
-
-impl<'a> BufRead for Input<'a> {
-    fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        self.source.fill_buf()
-    }
-    fn consume(&mut self, amt: usize) {
-        self.source.consume(amt);
-    }
-}
-
-lazy_static! {
-    static ref POINTS: Regex = Regex::new(r"(?x)
+static POINTS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?x)
         \[ (?P<points>  (?:\d{1,3},)*\d*\.?\d+) \]          |
         \[ (?P<disads> -(?:\d{1,3},)*\d*\.?\d+) \]          |
          < (?P<angle> -?(?:\d{1,3},)*\d*\.?\d+)  >          |
@@ -94,114 +62,179 @@ lazy_static! {
         \$ (?P<oneB>  -?(?:\d{1,3},)*\d*\.?\d+)B            |
         \$ (?P<oneM>  -?(?:\d{1,3},)*\d*\.?\d+)M            |
         \$ (?P<oneK>  -?(?:\d{1,3},)*\d*\.?\d+)K            |
-        \$ (?P<one>   -?(?:\d{1,3},)*\d*\.?\d+)
-    ").unwrap();
-}
+        \$ (?P<one>   -?(?:\d{1,3},)*\d*\.?\d+)",
+    )
+    .unwrap()
+});
 
-fn run() -> Result<()> {
-    let stdin = io::stdin();
-
-    let input = if let Some(arg) = env::args().nth(1) {
-        Input::file(&arg)?
-    } else {
-        Input::console(&stdin)
+fn main() -> Result<()> {
+    let file = env::args().nth(1);
+    let input: Box<dyn BufRead + Send + Sync> = match file {
+        Some(file) => Box::new(BufReader::new(File::open(file).unwrap())),
+        None => Box::new(BufReader::new(io::stdin())),
     };
 
-    let mut points: Vec<f64> = Vec::new();
-    let mut disads: Vec<f64> = Vec::new();
-    let mut angle:  Vec<f64> = Vec::new();
-    let mut curly:  Vec<f64> = Vec::new();
-    let mut pipe:   Vec<f64> = Vec::new();
-    let mut money:  Vec<f64> = Vec::new();
-    let mut weight: Vec<f64> = Vec::new();
+    let points = input
+        .lines()
+        .par_bridge()
+        .map(|line| {
+            let mut acc: Vec<Points> = Vec::new();
+            for item in POINTS.captures_iter(&line?) {
+                if let Some(p) = item.name("points") {
+                    acc.push(Points::Points(p.as_str().replace(",", "").parse::<f64>()?));
+                }
+                if let Some(d) = item.name("disads") {
+                    acc.push(Points::Disads(d.as_str().replace(",", "").parse::<f64>()?));
+                }
+                if let Some(a) = item.name("angle") {
+                    acc.push(Points::Angle(a.as_str().replace(",", "").parse::<f64>()?));
+                }
+                if let Some(c) = item.name("curly") {
+                    acc.push(Points::Curly(c.as_str().replace(",", "").parse::<f64>()?));
+                }
+                if let Some(p) = item.name("pipe") {
+                    acc.push(Points::Pipe(p.as_str().replace(",", "").parse::<f64>()?));
+                }
+                if let Some(l) = item.name("pounds") {
+                    acc.push(Points::Weight(l.as_str().replace(",", "").parse::<f64>()?));
+                }
+                if let Some(o) = item.name("ounces") {
+                    acc.push(Points::Weight(
+                        o.as_str().replace(",", "").parse::<f64>()? / 16.,
+                    ));
+                }
+                if let Some(k) = item.name("kilos") {
+                    acc.push(Points::Weight(
+                        k.as_str().replace(",", "").parse::<f64>()? * 2.205,
+                    ));
+                }
+                if let Some(g) = item.name("grams") {
+                    acc.push(Points::Weight(
+                        g.as_str().replace(",", "").parse::<f64>()? / 453.593,
+                    ));
+                }
+                if let Some(m) = item.name("one") {
+                    acc.push(Points::Money(m.as_str().replace(",", "").parse::<f64>()?));
+                }
+                if let Some(m) = item.name("oneK") {
+                    acc.push(Points::Money(
+                        m.as_str().replace(",", "").parse::<f64>()? * 1000.,
+                    ));
+                }
+                if let Some(m) = item.name("oneM") {
+                    acc.push(Points::Money(
+                        m.as_str().replace(",", "").parse::<f64>()? * 1000000.,
+                    ));
+                }
+                if let Some(m) = item.name("oneB") {
+                    acc.push(Points::Money(
+                        m.as_str().replace(",", "").parse::<f64>()? * 1000000000.,
+                    ));
+                }
+                if let Some(m) = item.name("oneT") {
+                    acc.push(Points::Money(
+                        m.as_str().replace(",", "").parse::<f64>()? * 1000000000000.,
+                    ));
+                }
+            }
+            Ok(acc)
+        })
+        .reduce(
+            || Ok(Vec::new()),
+            |a, b| -> Result<Vec<Points>> {
+                match (a, b) {
+                    (Err(e), Err(_)) | (Err(e), Ok(_)) | (Ok(_), Err(e)) => Err(e),
+                    (Ok(mut a), Ok(mut b)) => {
+                        a.append(&mut b);
+                        Ok(a)
+                    }
+                }
+            },
+        )?;
 
-    for line in input.lines() {
-        for item in POINTS.captures_iter(&line?) {
-            if let Some(p) = item.name("points") {
-                points.push(p.as_str().replace(",", "").parse::<f64>()?);
+    let ppipe: f64 = points
+        .par_iter()
+        .filter_map(|x| {
+            if let Points::Pipe(i) = x {
+                Some(i)
+            } else {
+                None
             }
-            if let Some(d) = item.name("disads") {
-                disads.push(d.as_str().replace(",", "").parse::<f64>()?);
+        })
+        .sum();
+    let pcurly: f64 = points
+        .par_iter()
+        .filter_map(|x| {
+            if let Points::Curly(i) = x {
+                Some(i)
+            } else {
+                None
             }
-            if let Some(a) = item.name("angle") {
-                angle.push(a.as_str().replace(",", "").parse::<f64>()?);
+        })
+        .sum();
+    let pangle: f64 = points
+        .par_iter()
+        .filter_map(|x| {
+            if let Points::Angle(i) = x {
+                Some(i)
+            } else {
+                None
             }
-            if let Some(c) = item.name("curly") {
-                curly.push(c.as_str().replace(",", "").parse::<f64>()?);
-            }
-            if let Some(p) = item.name("pipe") {
-                pipe.push(p.as_str().replace(",", "").parse::<f64>()?);
-            }
-            if let Some(l) = item.name("pounds") {
-                weight.push(l.as_str().replace(",", "").parse::<f64>()?);
-            }
-            if let Some(o) = item.name("ounces") {
-                weight.push(o.as_str().replace(",", "").parse::<f64>()? / 16.);
-            }
-            if let Some(k) = item.name("kilos") {
-                weight.push(k.as_str().replace(",", "").parse::<f64>()? * 2.205);
-            }
-            if let Some(g) = item.name("grams") {
-                weight.push(g.as_str().replace(",", "").parse::<f64>()? / 453.593);
-            }
-            if let Some(m) = item.name("one") {
-                money.push(m.as_str().replace(",", "").parse::<f64>()?);
-            }
-            if let Some(m) = item.name("oneK") {
-                money.push(m.as_str().replace(",", "").parse::<f64>()? * 1000.);
-            }
-            if let Some(m) = item.name("oneM") {
-                money.push(m.as_str().replace(",", "").parse::<f64>()? * 1000000.);
-            }
-            if let Some(m) = item.name("oneB") {
-                money.push(m.as_str().replace(",", "").parse::<f64>()? * 1000000000.);
-            }
-            if let Some(m) = item.name("oneT") {
-                money.push(m.as_str().replace(",", "").parse::<f64>()? * 1000000000000.);
-            }
-        }
-    }
+        })
+        .sum();
 
-    let ppipe:   f64 = pipe.iter().sum();
-    let pcurly:  f64 = curly.iter().sum();
-    let pangle:  f64 = angle.iter().sum();
-
-    let pweight: f64 = weight.iter().sum();
+    let pweight: f64 = points
+        .par_iter()
+        .filter_map(|x| {
+            if let Points::Weight(i) = x {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .sum();
     let pmetric: f64 = pweight / 2.205;
 
-    let pmoney:  f64 = money.iter().sum();
+    let pmoney: f64 = points
+        .par_iter()
+        .filter_map(|x| {
+            if let Points::Money(i) = x {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .sum();
 
-    let pdisads: f64 = disads.iter().sum();
-    let ppoints: f64 = points.iter().sum();
+    let pdisads: f64 = points
+        .par_iter()
+        .filter_map(|x| {
+            if let Points::Disads(i) = x {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .sum();
+    let ppoints: f64 = points
+        .par_iter()
+        .filter_map(|x| {
+            if let Points::Points(i) = x {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .sum();
 
     println!("{} points ({} disadvantages)", ppoints + pdisads, pdisads);
-    println!("Equipment: ${}, {} lbs. ({} kg.)",
+    println!(
+        "Equipment: ${}, {} lbs. ({} kg.)",
         pmoney.separated_string_with_fixed_place(2),
         pweight.separated_string_with_fixed_place(2),
-        pmetric.separated_string_with_fixed_place(2));
+        pmetric.separated_string_with_fixed_place(2)
+    );
     println!("Other sums: <{}> {{{}}} |{}|", pangle, pcurly, ppipe);
 
     Ok(())
-}
-
-fn main() {
-    if let Err(ref e) = run() {
-        use std::io::Write;
-        let stderr = &mut ::std::io::stderr();
-        let errmsg = "Error writing to stderr";
-
-        writeln!(stderr, "error: {}", e).expect(errmsg);
-
-        for e in e.iter().skip(1) {
-            writeln!(stderr, "caused by: {}", e).expect(errmsg);
-        }
-
-        // The backtrace is not always generated. Try to run this example
-        // with `RUST_BACKTRACE=1`.
-        if let Some(backtrace) = e.backtrace() {
-            writeln!(stderr, "backtrace: {:?}", backtrace).expect(errmsg);
-        }
-
-        ::std::process::exit(1);
-    }
 }
